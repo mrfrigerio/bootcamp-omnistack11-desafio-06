@@ -13,7 +13,7 @@ class ImportTransactionsService {
   async execute(filePath: string): Promise<Transaction[]> {
     const readCSVStream = fs.createReadStream(filePath);
     const parseStream = csvParse({
-      columns: true,
+      from_line: 2,
       ltrim: true,
       rtrim: true,
     });
@@ -22,20 +22,41 @@ class ImportTransactionsService {
 
     const data: TransactionDTO[] = [];
     parseCSV.on('data', line => {
-      data.push(line);
+      const [title, type, value, category] = line;
+      data.push({
+        title,
+        type,
+        value,
+        category,
+      });
     });
 
-    await new Promise(resolve => {
-      parseCSV.on('end', resolve);
-    });
-
-    const transactions = Promise.all(
-      data.map(async d => {
-        const transaction = await createTransactionsService.execute(d);
-        return transaction;
+    const transactionFunctions: (() => Promise<
+      Transaction
+    >)[] = await new Promise(resolve =>
+      parseCSV.on('end', () => {
+        const transactionFunctionsArray = data.map(d => {
+          const pendingTransaction = (): Promise<Transaction> =>
+            createTransactionsService.execute(d);
+          return pendingTransaction;
+        });
+        resolve(transactionFunctionsArray);
       }),
     );
 
+    async function persist(): Promise<Transaction[]> {
+      const transactions: Transaction[] = [];
+      while (transactionFunctions.length > 0) {
+        const func = transactionFunctions.shift();
+        if (func) {
+          const transaction = await func();
+          transactions.push(transaction);
+        }
+      }
+      return transactions;
+    }
+
+    const transactions = await persist();
     return transactions;
   }
 }
